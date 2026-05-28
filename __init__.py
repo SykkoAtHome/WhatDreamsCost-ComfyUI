@@ -6,8 +6,11 @@ from .load_audio_ui import LoadAudioUI
 from .load_video_ui import LoadVideoUI
 from .ltx_director import LTXDirector
 from .ltx_director_guide import LTXDirectorGuide
+from .vae_cudnn_fallback import patch_vae_cudnn_fallback
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
+
+patch_vae_cudnn_fallback()
 
 class PromptRelay(ComfyExtension):
     @override
