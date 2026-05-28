@@ -1,8 +1,17 @@
 from comfy_extras.nodes_lt import LTXVAddGuide
+import logging
 import torch
+import comfy.model_management
 import comfy.utils
 from comfy_api.latest import io
 from .ltx_director import GuideData
+
+
+log = logging.getLogger(__name__)
+
+
+def _is_cudnn_engine_error(exc):
+    return "GET was unable to find an engine to execute this computation" in str(exc)
 
 
 class LTXDirectorGuide(LTXVAddGuide):
@@ -31,6 +40,52 @@ class LTXDirectorGuide(LTXVAddGuide):
                 io.Latent.Output(display_name="latent", tooltip="Video latent with guide frames applied."),
             ],
         )
+
+    @classmethod
+    def encode(cls, vae, latent_width, latent_height, images, scale_factors, latent_downscale_factor=1):
+        try:
+            return super().encode(vae, latent_width, latent_height, images, scale_factors, latent_downscale_factor)
+        except RuntimeError as exc:
+            if not _is_cudnn_engine_error(exc):
+                raise
+
+            comfy.model_management.soft_empty_cache()
+
+            try:
+                import comfy.ops as comfy_ops
+            except Exception:
+                comfy_ops = None
+
+            if comfy_ops is not None and hasattr(comfy_ops, "NVIDIA_MEMORY_CONV_BUG_WORKAROUND"):
+                old_workaround = comfy_ops.NVIDIA_MEMORY_CONV_BUG_WORKAROUND
+                try:
+                    log.warning(
+                        "LTX Director Guide VAE encode hit a cuDNN Conv3D engine error; "
+                        "retrying with ComfyUI's NVIDIA Conv3D workaround disabled."
+                    )
+                    comfy_ops.NVIDIA_MEMORY_CONV_BUG_WORKAROUND = False
+                    return super().encode(vae, latent_width, latent_height, images, scale_factors, latent_downscale_factor)
+                except RuntimeError as retry_exc:
+                    if not _is_cudnn_engine_error(retry_exc):
+                        raise
+                    exc = retry_exc
+                finally:
+                    comfy_ops.NVIDIA_MEMORY_CONV_BUG_WORKAROUND = old_workaround
+
+            if torch.backends.cudnn.is_available():
+                old_cudnn_enabled = torch.backends.cudnn.enabled
+                try:
+                    log.warning(
+                        "LTX Director Guide VAE encode still hit a cuDNN Conv3D engine error; "
+                        "retrying once with cuDNN disabled for this encode."
+                    )
+                    torch.backends.cudnn.enabled = False
+                    comfy.model_management.soft_empty_cache()
+                    return super().encode(vae, latent_width, latent_height, images, scale_factors, latent_downscale_factor)
+                finally:
+                    torch.backends.cudnn.enabled = old_cudnn_enabled
+
+            raise exc
 
     @classmethod
     def execute(cls, positive, negative, vae, latent, guide_data, scale_by=1.0, upscale_method="bicubic") -> io.NodeOutput:
